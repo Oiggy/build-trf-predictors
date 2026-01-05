@@ -144,7 +144,7 @@ def plot_broadband_onset_timeseries(h5_path, wav_stems, out_png):
     """Create grid of broadband onset time series"""
     logger.info(f"Creating broadband onset visualization grid")
     items = []
-    with h5py.File(h5_path, "r") as h5:
+    with h5py.File(h5_path, "r", locking=False) as h5:
         for stem in wav_stems:
             key = f"{stem}/broadband/broad"
             if key in h5:
@@ -197,7 +197,7 @@ def main():
     logger.info(f"Found {len(wav_files)} WAV files")
     
     if ONSETS_H5.exists() and GRID_PNG.exists():
-        with h5py.File(ONSETS_H5, "r") as h5:
+        with h5py.File(ONSETS_H5, "r", locking=False) as h5:
             first_stem = wav_stems[0]
             if f"{first_stem}/broadband/broad" in h5:
                 logger.info(f"Broadband onsets already exist in {ONSETS_H5}")
@@ -216,7 +216,7 @@ def main():
     logger.info(f"Output file: {ONSETS_H5}")
     logger.info("")
     
-    with h5py.File(ENVELOPES_H5, "r") as h5_env, h5py.File(ONSETS_H5, "w") as h5_onset:
+    with h5py.File(ENVELOPES_H5, "r", locking=False) as h5_env, h5py.File(ONSETS_H5, "w", locking=False) as h5_onset:
         for idx, wav_path in enumerate(wav_files, 1):
             stim_name = wav_path.stem
             logger.info(f"Processing stimulus {idx}/{len(wav_files)}: {stim_name}")
