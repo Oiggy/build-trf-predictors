@@ -2,6 +2,35 @@
 gammatone_fbins_onsets.py - Compute onsets from 8-bin frequency envelopes
 
 ====================================================================
+ONSET METHOD: Neural Edge Detector (Fishbach et al., 2001)
+====================================================================
+Following Brodbeck et al. (2020, PLOS Biology), onsets are computed using
+a neural model of auditory edge detection rather than simple first difference.
+
+The edge detector passes each frequency-bin envelope through multiple
+parallel pathways with increasing temporal delays. Each pathway computes
+the difference between the current signal and the delayed version, then
+half-wave rectifies. Averaging across pathways produces a multi-scale
+temporal contrast signal that captures onset transients more precisely
+than a single-sample first difference.
+
+For each delay d in [1, 2, ..., N_STEPS]:
+    h_d(t) = max( envelope(t) - envelope(t - d), 0 )
+
+onset(t) = (1 / N_STEPS) * sum_d  h_d(t)
+
+This produces sharper, more impulse-like onset events, allowing the TRF
+to resolve the full biphasic neural response (positive ~65ms, negative
+~126ms) observed in Brodbeck et al.
+
+References:
+  Fishbach A, Nelken I, Yeshurun Y (2001). Auditory edge detection: a
+    neural model for physiological and psychoacoustical responses to
+    amplitude transients. J Neurophysiol 85:2303-2323.
+  Brodbeck C, Jiao A, Hong LE, Simon JZ (2020). Neural speech restoration
+    at the cocktail party. PLoS Biol 18(10):e3000883.
+
+====================================================================
 HOW TO RUN
 ====================================================================
 From project root directory:
@@ -36,8 +65,8 @@ OUTPUT STRUCTURE (CREATED BY SCRIPT)
 PROCESSING PIPELINE (PER STIMULUS)
 ====================================================================
 1. Load 8-bin envelopes from cache
-2. For each bin: compute first difference
-3. Half-wave rectify (keep only positive changes)
+2. For each bin: apply neural edge detector (multi-scale temporal contrast)
+3. Half-wave rectify within each delay pathway, then average
 4. Save to HDF5
 5. Generate spectrogram visualization grid
 
@@ -90,6 +119,9 @@ F_MAX    = 8000
 N_BANDS  = 128
 N_BINS   = 8
 SPEC_SFREQ = 1000
+
+# Edge detector parameters
+N_EDGE_STEPS = 8  # Number of delay pathways (Fishbach et al. use ~8)
 
 # Path configuration
 COCKTAIL_PARTY_DIR = HOME / "Github Dataset" / "cocktail-party"
@@ -151,12 +183,50 @@ def write_dataset(h5_file, key, data_2d, attrs):
         dset.attrs[attr_name] = attr_value
 
 
-def onset_from_envelope(envelope):
-    """Compute onset strength (half-wave rectified first difference)."""
+def onset_edge_detector(envelope, n_steps=N_EDGE_STEPS):
+    """
+    Neural edge detector for onset detection.
+
+    Following Fishbach et al. (2001) and Brodbeck et al. (2020):
+    Multiple parallel pathways with increasing delays detect temporal
+    changes at different scales. Half-wave rectification within each
+    pathway yields onset-sensitive responses. Averaging across pathways
+    produces a multi-scale temporal contrast signal.
+
+    For each delay d in [1, 2, ..., n_steps]:
+        h_d(t) = max( envelope(t) - envelope(t - d), 0 )
+
+    onset(t) = (1 / n_steps) * sum_d  h_d(t)
+
+    Parameters
+    ----------
+    envelope : 1D array
+        The envelope signal for one frequency bin.
+    n_steps : int
+        Number of delay pathways (default 8).
+
+    Returns
+    -------
+    onset : 1D array
+        Non-negative onset signal with sharper temporal precision
+        than simple first-difference half-wave rectification.
+    """
     envelope = np.asarray(envelope, dtype=float).ravel()
-    diff = np.diff(envelope, prepend=envelope[0])
-    diff[diff < 0] = 0.0
-    return np.asarray(diff, dtype=float).ravel()
+    n = len(envelope)
+
+    edge_sum = np.zeros(n, dtype=float)
+    for d in range(1, n_steps + 1):
+        # Create delayed version: delayed[t] = envelope[t - d]
+        delayed = np.zeros(n, dtype=float)
+        if d < n:
+            delayed[d:] = envelope[:n - d]
+        # Temporal contrast + half-wave rectification per pathway
+        diff = envelope - delayed
+        edge_sum += np.maximum(diff, 0.0)
+
+    # Average across delay pathways
+    onset = edge_sum / n_steps
+    return onset
 
 
 def grid_size(n_plots):
@@ -307,7 +377,12 @@ def main():
     logger.info(f"  - F_MAX: {F_MAX} Hz")
     logger.info(f"  - Number of bins: {N_BINS} (equally spaced in ERB)")
     logger.info(f"  - Sampling rate: {RESAMPLING_FREQUENCY} Hz")
-    logger.info(f"  - Onset method: Half-wave rectified first difference")
+    logger.info(f"  - Onset method: Neural edge detector (Fishbach et al., 2001)")
+    logger.info(f"  - Edge detector delay pathways: {N_EDGE_STEPS}")
+    logger.info(f"  - Delay range: 1-{N_EDGE_STEPS} samples "
+                f"({1000/RESAMPLING_FREQUENCY:.1f}-"
+                f"{N_EDGE_STEPS*1000/RESAMPLING_FREQUENCY:.1f} ms "
+                f"at {RESAMPLING_FREQUENCY} Hz)")
     logger.info(f"Output file: {ONSETS_H5}")
     logger.info("")
 
@@ -333,16 +408,17 @@ def main():
                 logger.info(f"  [STEP {bin_idx}] Processing bin: {bin_label}")
                 logger.info(f"    - Envelope shape: {envelope.shape}")
 
-                onset = onset_from_envelope(envelope)
+                onset = onset_edge_detector(envelope, n_steps=N_EDGE_STEPS)
                 positive_changes = np.sum(onset > 0)
                 logger.info(f"    - Onset shape: {onset.shape}")
-                logger.info(f"    - Positive changes: {positive_changes}")
+                logger.info(f"    - Positive samples: {positive_changes}")
 
                 onset_key   = f"{stim_name}/freq_bins/{bin_label}"
                 onset_attrs = {
                     "sfreq":            int(RESAMPLING_FREQUENCY),
                     "band_label":       bin_label,
-                    "onset_definition": "half-wave rectified first difference",
+                    "onset_definition": "neural edge detector (Fishbach et al., 2001)",
+                    "n_edge_steps":     int(N_EDGE_STEPS),
                     "binning":          "ERB-spaced",
                 }
                 write_dataset(h5_onset, onset_key, onset.reshape(-1, 1), onset_attrs)
